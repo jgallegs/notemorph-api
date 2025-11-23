@@ -1,12 +1,11 @@
-// src/middlewares/billingGuard.ts
-import {Request, Response, NextFunction} from "express";
+// src/middleware/billingGuard.ts
+import { Request, Response, NextFunction } from "express";
 
 export function billingGuard(req: Request, res: Response, next: NextFunction) {
-  // Futuro:
-  // - leer usuario desde auth (JWT/cookie)
-  // - mirar plan en DB
-  // - mirar contador de usos / día
-  // De momento, solo logueamos
   console.log("[billingGuard] Uso de endpoint OCR→DOCX (sin limitar aún)");
+  // Aquí en el futuro:
+  // - mirar usuario
+  // - leer plan
+  // - comprobar créditos / cuotas
   next();
 }

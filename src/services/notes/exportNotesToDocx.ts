@@ -1,3 +1,4 @@
+// src/services/notes/exportNotesToDocx.ts
 import path from "path";
 import fs from "fs/promises";
 import {
@@ -6,130 +7,179 @@ import {
   Paragraph,
   HeadingLevel,
   TextRun,
+  Table,
+  TableRow,
+  TableCell,
+  WidthType,
 } from "docx";
 import { randomUUID } from "crypto";
 import { NotesDocument } from "./types";
 
+type Block = Paragraph | Table;
+
 export async function exportNotesToDocx(doc: NotesDocument) {
-  const paragraphs: Paragraph[] = [];
+  const blocks: Block[] = [];
 
   // Título general
   if (doc.title) {
-    paragraphs.push(
+    blocks.push(
       new Paragraph({
         text: doc.title,
         heading: HeadingLevel.TITLE,
       })
     );
-    paragraphs.push(new Paragraph("")); // espacio
   }
 
   for (const section of doc.sections) {
-    // Encabezado de sección
     if (section.heading) {
+      const level = section.level ?? 1;
       const headingLevel =
-        section.level === 1
+        level === 1
           ? HeadingLevel.HEADING_1
-          : section.level === 2
+          : level === 2
           ? HeadingLevel.HEADING_2
           : HeadingLevel.HEADING_3;
 
-      paragraphs.push(
+      blocks.push(
         new Paragraph({
           text: section.heading,
           heading: headingLevel,
         })
       );
-      paragraphs.push(new Paragraph("")); // un pequeño espacio tras el heading
     }
 
-    // Contenido de la sección: lo convertimos a párrafos y listas
-    const contentParagraphs = buildParagraphsFromContent(section.content);
-    paragraphs.push(...contentParagraphs);
-
-    // Espacio entre secciones
-    paragraphs.push(new Paragraph(""));
+    const contentBlocks = parseContentToDocxBlocks(section.content ?? "");
+    blocks.push(...contentBlocks);
   }
 
   const docx = new Document({
-    sections: [{ properties: {}, children: paragraphs }],
+    sections: [{ children: blocks }],
   });
 
   const buffer = await Packer.toBuffer(docx);
 
-  const id = randomUUID();
-  const fileName = `notemorph-notes-${id}.docx`;
-  const outputDir = path.join(process.cwd(), "uploads", "generated");
+  const outputDir =
+    process.env.NOTES_OUTPUT_DIR || path.join(process.cwd(), "output");
   await fs.mkdir(outputDir, { recursive: true });
-  const outputPath = path.join(outputDir, fileName);
 
-  await fs.writeFile(outputPath, buffer);
+  const docxFileName = `notes-${randomUUID()}.docx`;
+  const docxPath = path.join(outputDir, docxFileName);
 
-  return { docxPath: outputPath, docxFileName: fileName };
+  await fs.writeFile(docxPath, buffer);
+
+  return { docxPath, docxFileName };
 }
 
 /**
- * Convierte el texto de una sección en una lista de Paragraph:
- * - detecta bullets (• o - al inicio)
- * - respeta saltos de línea
- * - separa varias viñetas en una misma línea
+ * Convierte el contenido plano (con posibles listas/tablas markdown)
+ * en bloques de docx (Paragraph y Table).
  */
-function buildParagraphsFromContent(content: string): Paragraph[] {
-  const result: Paragraph[] = [];
+function parseContentToDocxBlocks(content: string): Block[] {
+  const lines = content.split(/\r?\n/);
+  const result: Block[] = [];
+  let i = 0;
 
-  if (!content) return result;
+  while (i < lines.length) {
+    const line = lines[i].trim();
 
-  // 1) Separamos por líneas
-  const rawLines = content.split(/\r?\n/);
+    // Línea vacía → párrafo en blanco
+    if (line === "") {
+      result.push(new Paragraph({ text: "" }));
+      i++;
+      continue;
+    }
 
-  // 2) También separamos líneas que tienen varias "•" en una sola
-  const logicalLines: string[] = [];
-
-  for (const rawLine of rawLines) {
-    const line = rawLine.trim();
-    if (!line) continue;
-
-    if (line.includes("•")) {
-      // Split conservación de "•" al inicio de cada elemento
-      const parts = line
-        .split("•")
-        .map((p) => p.trim())
-        .filter((p) => p.length > 0);
-
-      for (const p of parts) {
-        logicalLines.push(`• ${p}`);
+    // Bloque de tabla markdown (líneas con '|')
+    if (isTableLine(line)) {
+      const tableLines: string[] = [];
+      while (i < lines.length && isTableLine(lines[i].trim())) {
+        tableLines.push(lines[i].trim());
+        i++;
       }
-    } else {
-      logicalLines.push(line);
+      const table = buildTableFromMarkdown(tableLines);
+      result.push(table);
+      continue;
     }
-  }
 
-  // 3) Para cada línea lógica, decidimos si es viñeta o párrafo normal
-  for (const line of logicalLines) {
-    const trimmed = line.trim();
-    if (!trimmed) continue;
-
-    // ¿Viñeta? (empieza por • o -)
-    if (trimmed.startsWith("•") || trimmed.startsWith("-")) {
-      const text = trimmed.replace(/^([•\-])\s*/, ""); // quitamos símbolo y espacio
-
-      result.push(
-        new Paragraph({
-          children: [new TextRun(text)],
-          bullet: {
-            level: 0,
-          },
-        })
-      );
-    } else {
-      // Párrafo normal
-      result.push(
-        new Paragraph({
-          children: [new TextRun(trimmed)],
-        })
-      );
+    // Lista con viñetas (- o *)
+    if (line.match(/^[-*]\s+/)) {
+      while (i < lines.length && lines[i].trim().match(/^[-*]\s+/)) {
+        const itemText = lines[i].trim().replace(/^[-*]\s+/, "");
+        result.push(
+          new Paragraph({
+            text: itemText,
+            bullet: { level: 0 },
+          })
+        );
+        i++;
+      }
+      continue;
     }
+
+    // Lista numerada simple: "1. algo"
+    if (line.match(/^\d+[\.\)]\s+/)) {
+      while (i < lines.length && lines[i].trim().match(/^\d+[\.\)]\s+/)) {
+        const itemText = lines[i].trim().replace(/^\d+[\.\)]\s+/, "");
+        result.push(
+          new Paragraph({
+            text: itemText,
+            bullet: { level: 0 }, // seguimos usando bullet para simplificar
+          })
+        );
+        i++;
+      }
+      continue;
+    }
+
+    // Párrafo normal: podemos juntar líneas consecutivas no vacías
+    const paragraphLines = [line];
+    i++;
+    while (i < lines.length && lines[i].trim() !== "" && !isTableLine(lines[i].trim()) && !lines[i].trim().match(/^[-*]\s+/) && !lines[i].trim().match(/^\d+[\.\)]\s+/)) {
+      paragraphLines.push(lines[i].trim());
+      i++;
+    }
+
+    const paragraphText = paragraphLines.join(" ");
+    result.push(
+      new Paragraph({
+        children: [new TextRun(paragraphText)],
+      })
+    );
   }
 
   return result;
+}
+
+function isTableLine(line: string): boolean {
+  // Consideramos que una línea es de tabla si tiene al menos 2 barras verticales
+  const count = (line.match(/\|/g) || []).length;
+  return count >= 2;
+}
+
+function buildTableFromMarkdown(lines: string[]): Table {
+  // Ignoramos la línea de separadores tipo "|---|---|"
+  const cleanedLines = lines.filter(
+    (l) => !l.match(/^\s*\|?\s*-{2,}.*\|?\s*$/)
+  );
+
+  const rows: TableRow[] = cleanedLines.map((line) => {
+    // Partimos por "|", quitamos celdas vacías al principio/fin
+    const rawCells = line.split("|").map((c) => c.trim());
+    const cells = rawCells.filter((c) => c.length > 0);
+
+    const cellNodes = cells.map(
+      (cellText) =>
+        new TableCell({
+          width: { size: 100 / cells.length, type: WidthType.PERCENTAGE },
+          children: [new Paragraph(cellText)],
+        })
+    );
+
+    return new TableRow({ children: cellNodes });
+  });
+
+  return new Table({
+    width: { size: 100, type: WidthType.PERCENTAGE },
+    rows,
+  });
 }
